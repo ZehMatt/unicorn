@@ -137,6 +137,31 @@ bool uc_arch_supported(uc_arch arch)
     }
 }
 
+#define TIMEOUT_STEP 2    // microseconds
+static void *_timeout_fn(void *arg)
+{
+    struct uc_struct *uc = arg;
+    for (;;)
+    {
+        usleep(TIMEOUT_STEP);
+
+        if(uc->shutdown)
+            break;
+
+        if(uc->emulation_done || uc->timeout == 0)
+            continue;
+
+        uint64_t current_time = get_clock();
+        if (current_time > uc->timeout)
+        {
+            uc->timed_out = true;
+            // force emulation to stop
+            uc_emu_stop(uc);
+        }
+    }
+
+    return NULL;
+}
 
 UNICORN_EXPORT
 uc_err uc_open(uc_arch arch, uc_mode mode, uc_engine **result)
@@ -150,6 +175,7 @@ uc_err uc_open(uc_arch arch, uc_mode mode, uc_engine **result)
             return UC_ERR_NOMEM;
         }
 
+        uc->shutdown = false;
         uc->errnum = UC_ERR_OK;
         uc->arch = arch;
         uc->mode = mode;
@@ -275,12 +301,14 @@ uc_err uc_open(uc_arch arch, uc_mode mode, uc_engine **result)
         if (uc->reg_reset)
             uc->reg_reset(uc);
 
+        qemu_thread_create(uc, &uc->timer, "timeout", _timeout_fn,
+            uc, QEMU_THREAD_JOINABLE);
+
         return UC_ERR_OK;
     } else {
         return UC_ERR_ARCH;
     }
 }
-
 
 UNICORN_EXPORT
 uc_err uc_close(uc_engine *uc)
@@ -288,6 +316,10 @@ uc_err uc_close(uc_engine *uc)
     int i;
     struct list_item *cur;
     struct hook *hook;
+
+    // wait for the timer to finish
+    uc->shutdown = true;
+    qemu_thread_join(&uc->timer);
 
     // Cleanup internally.
     if (uc->release)
@@ -491,34 +523,9 @@ uc_err uc_mem_write(uc_engine *uc, uint64_t address, const void *_bytes, size_t 
         return UC_ERR_WRITE_UNMAPPED;
 }
 
-#define TIMEOUT_STEP 2    // microseconds
-static void *_timeout_fn(void *arg)
-{
-    struct uc_struct *uc = arg;
-    int64_t current_time = get_clock();
-
-    do {
-        usleep(TIMEOUT_STEP);
-        // perhaps emulation is even done before timeout?
-        if (uc->emulation_done)
-            break;
-    } while((uint64_t)(get_clock() - current_time) < uc->timeout);
-
-    // timeout before emulation is done?
-    if (!uc->emulation_done) {
-        uc->timed_out = true;
-        // force emulation to stop
-        uc_emu_stop(uc);
-    }
-
-    return NULL;
-}
-
 static void enable_emu_timer(uc_engine *uc, uint64_t timeout)
 {
-    uc->timeout = timeout;
-    qemu_thread_create(uc, &uc->timer, "timeout", _timeout_fn,
-            uc, QEMU_THREAD_JOINABLE);
+    uc->timeout = get_clock() + timeout;
 }
 
 static void hook_count_cb(struct uc_struct *uc, uint64_t address, uint32_t size, void *user_data)
@@ -630,11 +637,6 @@ uc_err uc_emu_start(uc_engine* uc, uint64_t begin, uint64_t until, uint64_t time
 
     // emulation is done
     uc->emulation_done = true;
-
-    if (timeout) {
-        // wait for the timer to finish
-        qemu_thread_join(&uc->timer);
-    }
 
     if(uc->timed_out)
         return UC_ERR_TIMEOUT;

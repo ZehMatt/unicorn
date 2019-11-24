@@ -228,6 +228,7 @@ struct uc_struct {
     bool quit_request;  // request to quit the current TB, but continue to emulate - for uc_mem_protect()
     bool emulation_done;  // emulation is done by uc_emu_start()
     bool timed_out;     // emulation timed out, uc_emu_start() will result in EC_ERR_TIMEOUT
+    bool shutdown;
     QemuThread timer;   // timer for emulation timeout
     uint64_t timeout;   // timeout for uc_emu_start()
 
